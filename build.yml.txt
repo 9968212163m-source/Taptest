@@ -1,0 +1,313 @@
+name: Build Tap Test APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Write project files
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "TapTest"
+          include(":app")
+          EOF
+          mkdir -p .
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p .
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          
+          android {
+              namespace = "com.example.taptest"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.taptest"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+          
+              <application
+                  android:label="Tap Test"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+          
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+          
+                  <service
+                      android:name=".TapService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="Personal test of an invisible double-tap detector"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/java/com/example/taptest
+          cat > app/src/main/java/com/example/taptest/MainActivity.kt <<'EOF'
+          package com.example.taptest
+          
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          
+          class MainActivity : Activity() {
+          
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val pad = (16 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad, pad, pad)
+                  }
+          
+                  root.addView(TextView(this).apply {
+                      textSize = 16f
+                      text = "Invisible double-tap test\n\n" +
+                          "1. Allow 'display over other apps'.\n" +
+                          "2. Start the listener (try mode A first).\n" +
+                          "3. Open any app (Zoom, browser) and double-tap anywhere.\n" +
+                          "4. Pull down the notification shade: it shows taps heard and " +
+                          "double-taps detected. The phone also gives a short buzz on each double-tap.\n" +
+                          "5. Check that the app underneath still reacts to your taps normally.\n\n" +
+                          "If mode A hears nothing, stop and try mode B."
+                  })
+          
+                  fun addButton(label: String, action: () -> Unit) {
+                      root.addView(Button(this).apply {
+                          text = label
+                          setOnClickListener { action() }
+                      })
+                  }
+          
+                  addButton("1. Allow display over other apps") {
+                      startActivity(
+                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                      )
+                  }
+                  addButton("2. Start listener (mode A)") { startListener("A") }
+                  addButton("2b. Start listener (mode B)") { startListener("B") }
+                  addButton("Stop listener") { stopService(Intent(this, TapService::class.java)) }
+          
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+          
+              private fun startListener(mode: String) {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "Allow display over other apps first", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  }
+                  startForegroundService(Intent(this, TapService::class.java).putExtra("mode", mode))
+                  Toast.makeText(this, "Listener started (mode $mode)", Toast.LENGTH_SHORT).show()
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/example/taptest
+          cat > app/src/main/java/com/example/taptest/TapService.kt <<'EOF'
+          package com.example.taptest
+          
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.PixelFormat
+          import android.os.Build
+          import android.os.IBinder
+          import android.os.SystemClock
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          
+          class TapService : Service() {
+          
+              private lateinit var wm: WindowManager
+              private var overlay: View? = null
+              private var lastTap = 0L
+              private var taps = 0
+              private var doubles = 0
+              private var mode = "A"
+          
+              override fun onBind(intent: Intent?): IBinder? = null
+          
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  mode = intent?.getStringExtra("mode") ?: "A"
+                  taps = 0; doubles = 0; lastTap = 0L
+          
+                  val nm = getSystemService(NotificationManager::class.java)
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      nm.createNotificationChannel(
+                          NotificationChannel(CHANNEL, "Tap test", NotificationManager.IMPORTANCE_LOW)
+                      )
+                  }
+                  val n = buildNotification()
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  } else {
+                      startForeground(1, n)
+                  }
+          
+                  removeOverlay()
+                  addOverlay()
+                  return START_NOT_STICKY
+              }
+          
+              private fun addOverlay() {
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  val v = View(this)
+                  v.setOnTouchListener { _, e ->
+                      if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) onTap()
+                      false
+                  }
+          
+                  // Mode A: window cannot be touched at all (touches pass straight through).
+                  // Mode B: same, but without FLAG_NOT_TOUCHABLE (it is only 1 pixel).
+                  var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                      WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                  if (mode == "A") flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+          
+                  val lp = WindowManager.LayoutParams(
+                      1, 1,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      flags,
+                      PixelFormat.TRANSLUCENT
+                  ).apply { gravity = Gravity.TOP or Gravity.START; x = 0; y = 0 }
+          
+                  wm.addView(v, lp)
+                  overlay = v
+              }
+          
+              private fun onTap() {
+                  taps++
+                  val now = SystemClock.uptimeMillis()
+                  val gap = now - lastTap
+                  if (lastTap != 0L && gap in 60..350) {
+                      doubles++
+                      lastTap = 0L
+                      buzz()
+                  } else {
+                      lastTap = now
+                  }
+                  getSystemService(NotificationManager::class.java).notify(1, buildNotification())
+              }
+          
+              private fun buzz() {
+                  @Suppress("DEPRECATION")
+                  val vib = getSystemService(VIBRATOR_SERVICE) as Vibrator
+                  vib.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE))
+              }
+          
+              private fun buildNotification(): Notification =
+                  Notification.Builder(this, CHANNEL)
+                      .setSmallIcon(android.R.drawable.ic_menu_info_details)
+                      .setContentTitle("Tap test (mode $mode)")
+                      .setContentText("Taps heard: $taps   Double-taps: $doubles")
+                      .setOngoing(true)
+                      .build()
+          
+              private fun removeOverlay() {
+                  overlay?.let { runCatching { wm.removeView(it) } }
+                  overlay = null
+              }
+          
+              override fun onDestroy() {
+                  removeOverlay()
+                  super.onDestroy()
+              }
+          
+              companion object { private const val CHANNEL = "taptest" }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk TapTest.apk
+          gh release create "tap-test-${{ github.run_number }}" TapTest.apk \
+            --repo "${{ github.repository }}" \
+            --title "Tap Test build ${{ github.run_number }}" \
+            --notes "Debug APK for the double-tap test."
